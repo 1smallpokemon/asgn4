@@ -4,13 +4,13 @@
 (require typed/rackunit)
 (struct IdC ([id : Symbol]) #:transparent)
 (define-type FundefC (U FunC))
-(struct FunC ([name : Symbol] [arg : Symbol] [body : ExprC])#:transparent)
+(struct FunC ([name : Symbol] [args : (Listof Symbol)] [body : ExprC])#:transparent)
 
 (define-type ExprC (U NumC BinopC leq0? IdC FunAppC))
 (struct BinopC ([op : Symbol] [l : ExprC] [r : ExprC]) #:transparent)
 (struct NumC ([n : Real]) #:transparent)
 (struct leq0? ([test : ExprC] [then : ExprC] [else : ExprC]) #:transparent)
-(struct FunAppC ([fun : Symbol] [arg : ExprC]) #:transparent)
+(struct FunAppC ([fun : Symbol] [args : (Listof ExprC)]) #:transparent)
 
 ;; hash-table for BinopC, converts binary operators to their corresponding
 ;; racket operation
@@ -72,42 +72,72 @@
     [(list 'leq0? test 'then then 'else else)
      (leq0? (parse test) (parse then) (parse else))]
     [(? symbol? (? ValidSymbol? id)) (IdC id)]
-    [(list (? symbol? (? ValidSymbol? f)) arg) (FunAppC f (parse arg))]
+    [(cons (? symbol? (? ValidSymbol? f)) r)
+     (FunAppC f (map parse (cast r (Listof Sexp))))]
     [other (error 'parse "VVQS: illegal expression: ~e" other)]))
 
 ;; parse-fundef converts an S-expression into a FundefC (function definition)
 (define (parse-fundef [s : Sexp]) : FundefC
   (match s
-    [(list 'def (list (? symbol? (? ValidSymbol? id))
-                      (? symbol? (? ValidSymbol? arg))) '= exp)
-     (FunC id arg (parse exp))]
+    [(list 'def (cons (? symbol? (? ValidSymbol? id)) arg-list) '= exp)
+     (FunC id (map (λ (x) (match x [(? symbol? (? ValidSymbol? a)) a])) (cast arg-list (Listof Sexp))) (parse exp))]
     [other (error 'parse-fundef "VVQS: illegal function ~e" s)]))
 
 ;; interp consumes an abstract syntax tree to produce an answer
 ;; in the context of a list of FundefC
+;(define (interp [exp : ExprC] [funs : (Listof FundefC)]) : Real
+;  (match exp
+;    [(NumC n) n]
+;    [(BinopC o l r)
+;     ((hash-ref ops o) (interp l funs) (interp r funs))]
+;    [(leq0? test then else) (if (<= (interp test funs) 0)
+;                                (interp then funs)
+;                                (interp else funs))]
+;    [(IdC id) (error 'interp "VVQS: unbound identifier ~e" id)]
+;    [(FunAppC fun args)
+;     (define fun-def (lookup-fun fun funs))
+;     (define args-val (map (λ ([x : ExprC]) (interp x funs)) args))
+;     (define substituted-body (subst-args (FunC-args fun-def) args-val (FunC-body fun-def)))
+;     (interp substituted-body funs)]
+;    ))
 (define (interp [exp : ExprC] [funs : (Listof FundefC)]) : Real
   (match exp
     [(NumC n) n]
     [(BinopC o l r)
      ((hash-ref ops o) (interp l funs) (interp r funs))]
     [(leq0? test then else) (if (<= (interp test funs) 0)
-                                (interp then funs)
-                                (interp else funs))]
+                                 (interp then funs)
+                                 (interp else funs))]
     [(IdC id) (error 'interp "VVQS: unbound identifier ~e" id)]
-    [(FunAppC fun arg)
+    [(FunAppC fun args)
      (define fun-def (lookup-fun fun funs))
-     (define arg-val (interp arg funs))
-     (define substituted-body (subst (FunC-arg fun-def) (NumC arg-val) (FunC-body fun-def)))
+     (define args-val (map (λ ([x : ExprC]) (interp x funs)) args))
+     (define substituted-body (subst-args (FunC-args fun-def) (map parse args-val) (FunC-body fun-def)))
      (interp substituted-body funs)]))
 
-;; subst substitutes an ExprC for a Symbol in another ExprC
+
 (define (subst (x : Symbol) (v : ExprC) (e : ExprC)) : ExprC
   (match e
     [(NumC _) e]
     [(IdC id) (if (symbol=? x id) v e)]
     [(BinopC o l r) (BinopC o (subst x v l) (subst x v r))]
     [(leq0? test then else) (leq0? (subst x v test) (subst x v then) (subst x v else))]
-    [(FunAppC fun arg) (FunAppC fun (subst x v arg))]))
+    [(FunAppC fun args) (match args
+                          [(cons f r) (FunAppC fun (cons (subst x v f) (map (λ ([arg : ExprC]) (subst x v arg)) r)))])]))
+
+(define (subst-args (ids : (Listof Symbol)) (vals : (Listof ExprC)) (e : ExprC)) : ExprC
+  (if (and (null? ids) (null? vals))
+      e
+      (let ([id (first ids)]
+            [v (first vals)])
+        (subst-args (rest ids) (rest vals) (subst id v e)))))
+
+
+;(define (subst-args (ids : (Listof Symbol)) (vals : (Listof Real)) (e : ExprC)) : ExprC
+;  (if (null? ids)
+;      e
+;      (subst-args (cdr ids) (cdr vals) (subst (car ids) (NumC (car vals)) e))))
+
 
 ;; Test cases for parsing
 (define a1 (BinopC '+ (NumC 1) (NumC 2)))
@@ -129,11 +159,11 @@
 (check-equal? (parse '(leq0? 1 then (+ 1 2) else (+ 3 (+ 1 2)))) leq0-1)
 (check-equal? (parse '(leq0? 1 then 2 else 3)) (leq0? (NumC 1) (NumC 2) (NumC 3)))
 (check-equal? (parse 'x) (IdC 'x))
-(check-equal? (parse '(f 5)) (FunAppC 'f (NumC 5)))
+(check-equal? (parse '(f 5)) (FunAppC 'f (cons (NumC 5) '())))
 
 ;; Test cases for function parsing
-(check-equal? (parse-fundef '{def {add x} = {+ x 1}}) (FunC 'add 'x (BinopC '+ (IdC 'x) (NumC 1))))
-(check-equal? (parse-fundef '{def {mul x} = {* x 2}}) (FunC 'mul 'x (BinopC '* (IdC 'x) (NumC 2))))
+(check-equal? (parse-fundef '{def {add x} = {+ x 1}}) (FunC 'add '(x) (BinopC '+ (IdC 'x) (NumC 1))))
+(check-equal? (parse-fundef '{def {mul x} = {* x 2}}) (FunC 'mul '(x) (BinopC '* (IdC 'x) (NumC 2))))
 (check-exn #rx"illegal function" (lambda () (parse-fundef '(def (def x) = (+ x 1)))))
 
 ;; Test cases for program parsing and interpretation
